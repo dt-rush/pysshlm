@@ -234,7 +234,7 @@ class ThinWrapper():
 
 
             
-    # begin actually acting as a thing layer - start flowing input and output
+    # begin actually acting as a thin layer - start flowing input and output to/from the pty
     def enter (self):
         
         self.line_mode = False
