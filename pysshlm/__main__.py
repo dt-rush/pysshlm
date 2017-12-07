@@ -24,10 +24,11 @@ def main(args=None):
         
     args = argparser.parse_args (args)
 
-    host = args.host
+    ssharg = args.ssharg
+    password = args.password
 
     print banner
-    run_session (host)
+    run_session (ssharg, password)
 
     
     

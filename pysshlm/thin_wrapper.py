@@ -20,7 +20,7 @@ def get_term_dimensions():
 # wrapper class handling input buffering, managing the opening and closing of the PTY 
 class ThinWrapper():
 
-    def __init__ (self, cmd):
+    def __init__ (self, cmd, password=None):
         # god bless the author of blessed for their work in setting up sequence handling
         self.t = Terminal()
         # are we editing in line mode or single-char-send mode
@@ -48,6 +48,10 @@ class ThinWrapper():
         self.cmd = cmd
         # spawn the PTY (get dimensions from current tty)
         self.pty = PtyProcessUnicode.spawn (cmd, dimensions=get_term_dimensions())
+        # provide a password to the pty if one was given, once it enters noecho
+        if password is not None:
+            self.pty.waitnoecho()
+            self.pty.write (password + '\r')
         
         # used to prevent stdout writing contention / interleaving
         self.stdout_lock = threading.RLock()
