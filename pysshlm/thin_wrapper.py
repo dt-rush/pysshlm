@@ -260,7 +260,7 @@ class ThinWrapper():
         def flow_input ():
             while self.pty.isalive():
                 time.sleep (0.005)
-                # c = sys.stdin.read (1)
+                # read a single char
                 with self.t.cbreak():
                     try:
                         c = self.t.inkey()
