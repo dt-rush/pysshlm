@@ -1,0 +1,4 @@
+blessed==1.14.2
+ptyprocess==0.5.2
+six==1.11.0
+wcwidth==0.1.7
