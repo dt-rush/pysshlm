@@ -1,5 +1,4 @@
 import os
-import sys
 import time
 import tty
 import termios
@@ -13,278 +12,282 @@ from blessed.keyboard import Keystroke
 from ptyprocess import PtyProcessUnicode
 
 from pysshlm.config import pysshlm_config
+from pysshlm.term_io_handler import TermIOHandler
 
 # helper function
 def get_term_dimensions():
     return tuple (map (lambda (x): int(x), os.popen('stty size', 'r').read().split()))
 
+
+
 # wrapper class handling input buffering, managing the opening and closing of the PTY 
 class ThinWrapper():
 
     def __init__ (self, cmd, password=None):
-        # god bless the author of blessed for their work in setting up sequence handling
-        self.t = Terminal()
-        # are we editing in line mode or single-char-send mode
-        self.line_mode = False
+
         # hotkey to enter line-editing mode (raw key value)
         # read hotkey definition from pysshlm.cfg
         # (hotkey will determine if we're popping into or out of line-editing mode)
-        self.hotkey = pysshlm_config.get ("hotkey")
+        self._hotkey = pysshlm_config.get ("hotkey")
+
+        # are we editing in line mode or single-char-send mode? default to no
+        self._line_mode = False
+
         # used to hold the line buffer in line-editing mode
-        self.line_buffer = ""
+        self._line_buffer = ""
 
-        # used to notify the user of popping into / out of line-mode
-        self.notifier = pysshlm_config.get ("notifier")
-        self.notifier_on = '[%s]' % (self.notifier,)
-        self.notifier_off = '[\%s]' % (self.notifier,)
-        # used to block processing keypresses while notifier active
-        self.can_process_keypress_flag = threading.Event()
-        self.can_process_keypress_flag.set()
-        # used to prevent race conditions in displaying / waiting / erasing a notifier (using threading.Timer)
-        self.notifier_write_lock = threading.Lock()
-        # the currently-displayed notifier string
-        self.current_notifier_str = ""
+        # used to display a notifier when the line-mode is toggled
+        self._notifier = pysshlm_config.get ("notifier")
+        self._line_mode_notifier_on = '[%s]' % (self._notifier,)
+        self._line_mode_notifier_off = '[\%s]' % (self._notifier,)
 
-        # save a reference to the cmd
-        self.cmd = cmd
+        # god bless the author of blessed for their work in setting up sequence handling
+        self._t = Terminal()
+
+        # save a reference to the cmd and password for future use
+        self._cmd = cmd
+        # it's up to you to ensure that there aren't programs on your machine reading memory for passwords,
+        # and if they can do that, they can also read private keys GG
+        self._password = password
         # spawn the PTY (get dimensions from current tty)
-        self.pty = PtyProcessUnicode.spawn (cmd, dimensions=get_term_dimensions())
-        # provide a password to the pty if one was given, once it enters noecho
-        if password is not None:
-            self.pty.waitnoecho()
-            self.pty.write (password + '\r')
+        self._pty = PtyProcessUnicode.spawn (cmd, dimensions=get_term_dimensions())
+
+        # for handling reading/writing to/from pty and writing to the user's terminal
+        self._io = TermIOHandler (self._pty)
+
+         # set-up handling for terminal window resize
+        self._setup_SIGWINCH_handler()
+        self._has_been_resized = False
         
-        # used to prevent stdout writing contention / interleaving
-        self.stdout_lock = threading.RLock()
-        self.lock_nesting = 0
-        
-        # set-up handling for terminal window resize
-        self.setup_SIGWINCH_handler()
-        self.has_been_resized = False
-        
+        # two looping threads that will process input and output to/from the user / pty
+        # they are initialized and run in enter()
+        self._flow_output_thread = None
+        self._flow_input_thread = None
 
         
+
+    #
+    #
+    # terminal handling functions
+    #
+    #
 
     # attach a listener for window change signal to propagate the change to the PTY
-    def setup_SIGWINCH_handler (self):
+    def _setup_SIGWINCH_handler (self):
         # handler for the signal
         def handler (signum, stackframe):
-            self.has_been_resized = True
+            self._has_been_resized = True
         # listen for the signal
         signal.signal (signal.SIGWINCH, handler)
         # create a thread that every 1000 milliseconds will check if the window has changed size
         def check_resize():
-            while self.pty.isalive():
+            while self._pty.isalive():
                 time.sleep (1)
-                if self.has_been_resized:
-                    self.pty.setwinsize (*(get_term_dimensions()))
-                    self.has_been_resized = False
+                if self._has_been_resized:
+                    self._pty.setwinsize (*(get_term_dimensions()))
+                    self._has_been_resized = False
         check_resize_thread = threading.Thread (target=check_resize)
         check_resize_thread.setDaemon (True)
         check_resize_thread.start()
 
-    # thanks to Alex Martelli for suggesting this pattern
-    # https://stackoverflow.com/a/3030755/4785602
-    
-    def get_stdout_lock (self):
-        self.stdout_lock.acquire()
-        self.lock_nesting += 1
+    def _notice_pty_dead (self):
+        self._io.screen_write ("[pysshlm]: %s session died" % (self._cmd[0]))
+
+
         
-    def drop_stdout_lock(self):
-        nesting = self.lock_nesting
-        self.lock_nesting = 0
-        for i in range (nesting):
-            self.stdout_lock.release()
+    #
+    #
+    # line-mode functions
+    #
+    #
 
-    def locked_stdout_write (self, s):
-        self.get_stdout_lock()
-        sys.stdout.write (s)
-        sys.stdout.flush()
-        self.drop_stdout_lock()
-
-
-
-    def notice_pty_dead (self):
-        print "[pysshlm]: %s session died" % (self.cmd[0])
-        # needed since the stdin read will want a char before the loop can end in enter(),
-        # even though the session is dead
-        print "[pysshlm]: (press any key)"
-
-            
-        
     # toggle whether we're in line-entry mode
-    def toggle_line_mode (self):
-        self.line_mode = not self.line_mode
+    def _toggle_line_mode (self):
+        self._line_mode = not self._line_mode
 
-
-    # there is some dank lock / flag / thread logic here, so be careful to read good
-    def display_notifier (self, msg, duration=0.5):
-        self.notifier_write_lock.acquire()
-        # clear if existing notifier is displayed
-        if len (self.current_notifier_str) != 0:
-            self.backspace (len (self.current_notifier_str))
-        # set the current notifier str and write it
-        self.current_notifier_str = msg
-        self.locked_stdout_write (self.current_notifier_str)
-        self.can_process_keypress_flag.clear()
-        self.notifier_write_lock.release()
-        
-        # to be run after a delay
-        def remove_active_notifier():
-            self.notifier_write_lock.acquire()
-            if len (self.current_notifier_str) != 0:
-                self.backspace (len (self.current_notifier_str))
-                self.current_notifier_str = ""
-                self.can_process_keypress_flag.set()
-            self.notifier_write_lock.release()
-        threading.Timer (duration, remove_active_notifier).start()
-        
-        
     # delete the current line buffer from the screen and clear it in memory
-    def cancel_current_line_edits (self):
-        self.backspace (len (self.line_buffer))
-        self.clear_line_buffer()
+    def _cancel_current_line_edits (self):
+        self._io.backspace (len (self._line_buffer))
+        self._clear_line_buffer()
 
     # clear the current line buffer
     # TODO: access stack properly when line history is implemented
-    def clear_line_buffer (self):
-        self.line_buffer = ""
-
-    # clear n characters backward (can't go past line-breaks)
-    def backspace (self, n):
-        self.locked_stdout_write ('\b' * n + ' ' * n + '\b' * n)
+    def _clear_line_buffer (self):
+        self._line_buffer = ""
 
     # add a string to the line buffer
-    def add_to_line_buffer (self, s):
-        self.locked_stdout_write (s)
+    def _add_to_line_buffer (self, s):
+        self._io.screen_write (s)
         # TODO: after implementation of arrow keys in line-mode, tracking of position,
         # insert at the position rather than append
-        self.line_buffer += s
+        self._line_buffer += s
 
 
-    def process_keypress_normal (self, key):
-        self.pty.write (key)
+        
+    #
+    #
+    # input processing functions
+    #
+    #
+    
+    def _process_keypress_normal (self, key):
+        self._pty.write (key)
 
-    def process_keypress_line_mode (self, key):
+    def _process_keypress_line_mode (self, key):
 
         # handle blessed.Keystroke values
         if type (key) is Keystroke:
+            self._process_blessed_keystroke (key)
             
-            # handle special key codes
-
-            # enter submits the current line buffer
-            if key.code == self.t.KEY_ENTER:
-                self.backspace (len (self.line_buffer))
-                self.pty.write (self.line_buffer + '\r')
-                self.clear_line_buffer()
-
-            # NOTE: delete / backspace both get mapped to KEY_DELETE by blessed
-            # backspace a char
-            elif key.code == self.t.KEY_DELETE:
-                    # a bit of a hack, since \b only moves the cursor back,
-                    # we want to move it back, write a space, then move it back again
-                    if len (self.line_buffer) != 0:
-                        self.locked_stdout_write ('\b \b')
-                    # if printed char was backspace, strip 1 char from linebuffer
-                    self.line_buffer = self.line_buffer[:-1]
-
-
-            # elif IS MOVEMENT KEY?
-            # TODO: implement position tracking (left, right) in where we write / backspace
-            # TODO: make sure that CTRL-left, CTRL-right work properly
-            # TODO: implement "up"/"down" via a stack of past lines, with [0] == current line_buffer
-
-            # until the above is implemented, ignore all sequences, they should not be added to the buffer
-            elif key.is_sequence:
-                pass
-
-            # handle control sequence chars (which are best compared with their direct char values)
-            elif unicodedata.category (key) == "Cc":
-                # handle ctrl + D (remember we're in line-mode)
-                if key == u'\x04':
-                    self.display_notifier ("[exit line-mode to send CTRL-D]", 0.8)
-                # ignore all control chars not handled above
-                else:
-                    self.display_notifier ("[line-mode ignores control chars]", 0.8)
-
-            # handle all other key presses (AKA those not detected above) in line-mode by appending to buffer
-            else:
-                self.add_to_line_buffer (key)
-
-                
         # handle direct key value passthrough (as in the case of CTRL-C)            
         elif type (key) is unicode:
-            if key == '\x03':
-                # CTRL-C in line-mode cancels edits
-                self.cancel_current_line_edits()
-                self.display_notifier ("[cleared line]")
-        
+            self._process_raw_keyval (key)
+            
+    def _process_raw_keyval (key):
+        # CTRL-C in line-mode cancels edits
+        if key == '\x03':
+            self._cancel_current_line_edits()
+            self._io.display_notifier ("[cleared line]")
+
+    def _process_blessed_keystroke (self, key):
+        # enter submits the current line buffer
+        if key.code == self._t.KEY_ENTER:
+            self._io.backspace (len (self._line_buffer))
+            self._io.pty_write (self._line_buffer + '\r')
+            self._clear_line_buffer()
+
+        # NOTE: delete / backspace both get mapped to KEY_DELETE by blessed
+        # backspace a char
+        elif key.code == self._t.KEY_DELETE:
+            if len (self._line_buffer) != 0:
+                # note that \b only moves cursor left, we have to overwrite it and come back
+                self._io.screen_write ('\b \b')
+                # strip 1 char from linebuffer
+                self._line_buffer = self._line_buffer[:-1]
+
+        # elif IS MOVEMENT KEY?
+        # TODO: implement position tracking (left, right) in where we write / backspace
+        # TODO: make sure that CTRL-left, CTRL-right work properly
+        # TODO: implement "up"/"down" via a stack of past lines, with [0] == current line_buffer
+
+        # until the above is implemented, ignore all sequences, they should not be added to the buffer
+        elif key.is_sequence:
+            pass
+
+        # handle control sequence chars (which are best compared with their direct char values)
+        elif unicodedata.category (key) == "Cc":
+            # handle ctrl + D (remember we're in line-mode)
+            if key == u'\x04':
+                self._io.display_notifier ("[exit line-mode to send CTRL-D]", 0.8)
+            # ignore all control chars not handled above
+            else:
+                self._io.display_notifier ("[line-mode ignores control chars]", 0.8)
+
+        # handle all other key presses (AKA those not detected above) in line-mode by appending to buffer
+        else:
+            self._add_to_line_buffer (key)
 
     # either store in line-buffer or send directly
-    def process_keypress (self, key):
+    def _process_keypress (self, key):
 
         # block keypress processing while a notifier active
-        self.can_process_keypress_flag.wait()
+        self._io.can_process_keypress_flag.wait()
 
-        if not self.line_mode:
-            self.process_keypress_normal (key)
+        if not self._line_mode:
+            self._process_keypress_normal (key)
         else:
-            self.process_keypress_line_mode (key)
-
-                    
+            self._process_keypress_line_mode (key)
 
     # react to a keypress
-    def on_press (self, key):
-        # if hotkey, toggle line-mode
-        if repr (key) == self.hotkey:
-            self.toggle_line_mode()
-            if not self.line_mode:
-                self.cancel_current_line_edits()
-            self.display_notifier (self.notifier_on if self.line_mode else self.notifier_off)
+    def _on_press (self, key):
+        # if hotkey, toggle line-mode (and display notifier)
+        if repr (key) == self._hotkey:
+            self._toggle_line_mode()
+            if not self._line_mode:
+                # if we turned it off, erase the line so far written
+                self._cancel_current_line_edits()
+                self._io.display_notifier (self._line_mode_notifier_off)
+            else:
+                self._io.display_notifier (self._line_mode_notifier_on)
         # else process char 
         else:
-            self.process_keypress (key)
+            self._process_keypress (key)
 
 
+
+    #
+    #
+    # publicly-exposed functions
+    #
+    #
             
     # begin actually acting as a thin layer - start flowing input and output to/from the pty
     def enter (self):
+
+        # provide a password to the pty if one was given, once it
+        # enters/is in noecho, before proceeding
+        if self._password is not None:
+            self._io.wait_enter_noecho_password (self._password)
+
+        # used to allow the flow_output thread to end itself and flow_input if we get EOF
+        session_over_flag = threading.Event()
         
-        self.line_mode = False
-        
-        # read from the pty output and forawrd to stdout
+        # read from the pty output and forward to stdout
         def flow_output ():
-            while self.pty.isalive():
+            while not session_over_flag.is_set():
                 time.sleep (0.005)
                 try:
-                    s = self.pty.read (size=1024)
-                    self.locked_stdout_write (s)
+                    s = self._pty.read (size=1024)
+                    self._io.screen_write (s)
                 except EOFError:
                     break # break, since this will only come if the pty is dead
                 except UnicodeDecodeError as e:
-                    self.locked_stdout_write ("\n[pysshlm]: %s.\n[pysshlm]: Possibly stdout of session tried to send binary data, such as when running \"cat\" on a binary file?\n" % (str(e),))
-            self.notice_pty_dead()
+                    self._io.screen_write ("\n[pysshlm]: %s.\n" % (str (e),))
+                    self._io.screen_write ("[pysshlm]: Possibly stdout of session tried to send binary data, such as when running \"cat\" on a binary file?\n")
+            # if we're here, the pty died or sent EOF
+            self._notice_pty_dead()
+            session_over_flag.set()
 
-        flow_output_thread = threading.Thread (target=flow_output)
-        flow_output_thread.setDaemon (True)
-        flow_output_thread.start()
+        self._flow_output_thread = threading.Thread (target=flow_output)
+        self._flow_output_thread.setDaemon (True)
+        self._flow_output_thread.start()
 
-        # not written to be called as a thread because otherwise this whole function will pass through,
-        # and running pty.wait() to hold up will set up waitpid on a child process, which will explode
-        # the universe when SIGWINCH arrives (among other signals, I'm sure)
+        
+        # read from user stdin (in cbreak mode) and pass to processing functions
+        input_loop_finished_flag = threading.Event()
         def flow_input ():
-            while self.pty.isalive():
-                time.sleep (0.005)
+            # in practice, the thread running tihs loop can also be
+            # terminated by flow_output getting EOFError
+            while not session_over_flag.is_set():
                 # read a single char
-                with self.t.cbreak():
+                with self._t.cbreak():
                     try:
-                        c = self.t.inkey()
-                        self.on_press (c)
+                        # wait at most 200ms for a keypress to process before continuing
+                        c = self._t.inkey (timeout=0.2)
+                        if str(c) != u'': # timeout returns u''
+                            self._on_press (c)
                     except KeyboardInterrupt:
                         # catch keyboard interrupt and pass through as a unicode string directly
-                        self.on_press (u'\x03')
-                    
+                        self._on_press (u'\x03')
+                    # NOTE / TODO: if the terminal receives a control character
+                    # in the time between each of these tight loops, it will
+                    # usually default to displaying it, like "^L", as in the case
+                    # of spamming the hotkey (meaning the backspace will be off,
+                    # and two characters will be left hanging there)
+                    # improving the backspace function to backspace *to* a specific point
+                    # would be good, but would require a slight reworking of the notifier
+                    # logic in term_io_handler.py to remember the position that
+                    # remove_active_notifier() should know to backspace *to*
 
-        flow_input()
+            # if we're here, the input loop has terminated
+            input_loop_finished_flag.set()
 
+        self._flow_input_thread = threading.Thread (target=flow_input)
+        self._flow_input_thread.setDaemon (True)
+        self._flow_input_thread.start()
+
+        # wait here to avoid falling through since all we did above was spawn threads
+        # we specifically wait for the input thread to finish since if it dies while waiting
+        # for a char in cbreak mode, the terminal will be stuck in cbreak mode
+        input_loop_finished_flag.wait()
 
