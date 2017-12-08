@@ -5,6 +5,7 @@ import tty
 import termios
 import threading
 import signal
+import unicodedata
 
 from blessed import Terminal
 from blessed.keyboard import Keystroke
@@ -117,7 +118,7 @@ class ThinWrapper():
 
 
     # there is some dank lock / flag / thread logic here, so be careful to read good
-    def display_notifier (self, msg):
+    def display_notifier (self, msg, duration=0.5):
         self.notifier_write_lock.acquire()
         # clear if existing notifier is displayed
         if len (self.current_notifier_str) != 0:
@@ -136,7 +137,7 @@ class ThinWrapper():
                 self.current_notifier_str = ""
                 self.can_process_keypress_flag.set()
             self.notifier_write_lock.release()
-        threading.Timer (0.5, remove_active_notifier).start()
+        threading.Timer (duration, remove_active_notifier).start()
         
         
     # delete the current line buffer from the screen and clear it in memory
@@ -160,6 +161,63 @@ class ThinWrapper():
         # insert at the position rather than append
         self.line_buffer += s
 
+
+    def process_keypress_normal (self, key):
+        self.pty.write (key)
+
+    def process_keypress_line_mode (self, key):
+
+        # handle blessed.Keystroke values
+        if type (key) is Keystroke:
+            
+            # handle special key codes
+
+            # enter submits the current line buffer
+            if key.code == self.t.KEY_ENTER:
+                self.backspace (len (self.line_buffer))
+                self.pty.write (self.line_buffer + '\r')
+                self.clear_line_buffer()
+
+            # NOTE: delete / backspace both get mapped to KEY_DELETE by blessed
+            # backspace a char
+            elif key.code == self.t.KEY_DELETE:
+                    # a bit of a hack, since \b only moves the cursor back,
+                    # we want to move it back, write a space, then move it back again
+                    if len (self.line_buffer) != 0:
+                        self.locked_stdout_write ('\b \b')
+                    # if printed char was backspace, strip 1 char from linebuffer
+                    self.line_buffer = self.line_buffer[:-1]
+
+
+            # elif IS MOVEMENT KEY?
+            # TODO: implement position tracking (left, right) in where we write / backspace
+            # TODO: make sure that CTRL-left, CTRL-right work properly
+            # TODO: implement "up"/"down" via a stack of past lines, with [0] == current line_buffer
+
+            # until the above is implemented, ignore all sequences, they should not be added to the buffer
+            elif key.is_sequence:
+                pass
+
+            # handle control sequence chars (which are best compared with their direct char values)
+            elif unicodedata.category (key) == "Cc":
+                # handle ctrl + D (remember we're in line-mode)
+                if key == u'\x04':
+                    self.display_notifier ("[exit line-mode to send CTRL-D]", 0.8)
+                # ignore all control chars not handled above
+                else:
+                    self.display_notifier ("[line-mode ignores control chars]", 0.8)
+
+            # handle all other key presses (AKA those not detected above) in line-mode by appending to buffer
+            else:
+                self.add_to_line_buffer (key)
+
+                
+        # handle direct key value passthrough (as in the case of CTRL-C)            
+        elif type (key) is unicode:
+            if key == '\x03':
+                # CTRL-C in line-mode cancels edits
+                self.cancel_current_line_edits()
+                self.display_notifier ("[cleared line]")
         
 
     # either store in line-buffer or send directly
@@ -169,58 +227,9 @@ class ThinWrapper():
         self.can_process_keypress_flag.wait()
 
         if not self.line_mode:
-            # if not in line mode, simply send the key
-            self.pty.write (key)
-            
+            self.process_keypress_normal (key)
         else:
-
-            # if we ARE in line mode...
-
-            # handle direct key passthrough (as in the case of CTRL-C)
-            if type (key) == unicode:
-                if key == '\x03':
-                    # CTRL-C in line-mode cancels edits
-                    self.cancel_current_line_edits()
-                    self.display_notifier ("[cleared line]")
-
-            else:
-                # if the above is not true, we are handling an instance of blessed.keyboard.Keystroke
-                # we *should* crash here otherwise, as it means someone has edited the code to provide
-                # more types of keys. This is really just to aid readability more than it is "defensive"
-                assert (type (key) is Keystroke)    
-
-                # handle special key codes
-
-                # enter submits the current line buffer
-                if key.code == self.t.KEY_ENTER:
-                    self.backspace (len (self.line_buffer))
-                    self.pty.write (self.line_buffer + '\r')
-                    self.clear_line_buffer()
-
-                # NOTE: delete / backspace both get mapped to KEY_DELETE by blessed
-                # backspace a char
-                elif key.code == self.t.KEY_DELETE:
-                        # a bit of a hack, since \b only moves the cursor back,
-                        # we want to move it back, write a space, then move it back again
-                        if len (self.line_buffer) != 0:
-                            self.locked_stdout_write ('\b \b')
-                        # if printed char was backspace, strip 1 char from linebuffer
-                        self.line_buffer = self.line_buffer[:-1]
-
-
-                # elif IS MOVEMENT KEY?
-                # TODO: implement position tracking (left, right) in where we write / backspace
-                # TODO: make sure that CTRL-left, CTRL-right work properly
-                # TODO: implement "up"/"down" via a stack of past lines, with [0] == current line_buffer
-                # until the above is implemented, ignore all sequences, they should not be added to the buffer
-                elif key.is_sequence:
-                    pass # do nothing
-
-                # handle all other key presses (AKA those not detected above) in line-mode by appending to buffer
-                
-                else:
-                    # add to buffer and print to screen so we know what we're typing
-                    self.add_to_line_buffer (key)
+            self.process_keypress_line_mode (key)
 
                     
 
