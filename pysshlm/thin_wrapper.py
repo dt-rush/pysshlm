@@ -252,6 +252,8 @@ class ThinWrapper():
                     self.locked_stdout_write (s)
                 except EOFError:
                     break # break, since this will only come if the pty is dead
+                except UnicodeDecodeError as e:
+                    self.locked_stdout_write ("\n[pysshlm]: %s.\n[pysshlm]: Possibly stdout of session tried to send binary data, such as when running \"cat\" on a binary file?\n" % (str(e),))
             self.notice_pty_dead()
 
         flow_output_thread = threading.Thread (target=flow_output)
