@@ -28,6 +28,8 @@ After installing, run the command, optionally specifying a user and a password:
 
 Once the session starts, you can type CTRL+L at any time to pop into and out of line-editing mode.
 
+You can force quit in line-mode by hitting CTRL+D.
+
 ## windows
 
 Windows is not supported and I can't believe you are trying to do terminal-based stuff in windows. I'm sorry to hear about that. Let me guess, you got the cygwin blues? Or is gitbash a harsh mistress? Maybe try VirtualBox? 
