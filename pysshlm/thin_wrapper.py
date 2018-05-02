@@ -1,4 +1,3 @@
-import os
 import sys
 import tty
 import termios
@@ -8,25 +7,19 @@ import signal
 import unicodedata
 import ast
 
+from blessed import Terminal
+
 from ptyprocess import PtyProcessUnicode
 
-from pysshlm.config import pysshlm_config
 from pysshlm.term_io_handler import TermIOHandler
-
-
-# helper function
-def get_term_dimensions():
-    return tuple (map (int, os.popen('stty size', 'r').read().split()))
-
-
-# Constants defining modes
-
-# keys are passed directly through to the PTY
-KEY_PASSTHROUGH = 0
-# type into a line buffer which is sent with \r ("enter")
-LINE_BUFFERED = 1
-# prompt the user whether they want to quit
-QUIT_PROMPT = 2
+from pysshlm.modes import (
+        KEY_PASSTHROUGH,
+        LINE_BUFFERED,
+        QUIT_PROMPT
+)
+from pysshlm.config import pysshlm_config
+from pysshlm.utils import get_term_dimensions
+from pysshlm.mode_controller import ModeController
 
 
 # wrapper class handling input buffering,
@@ -34,7 +27,62 @@ QUIT_PROMPT = 2
 class ThinWrapper():
 
     def __init__ (self, cmd):
+        # blessings to the author of blessed for this
+        self._t = Terminal()
+        # used to transition between modes
+        self._setup_mode_controller()
+        # used to control the wrapper
+        self._setup_hotkeys()
+        # used to hold the line buffer in line-editing mode
+        self._line_buffer = ""
+        # used to display a notifier when the line-mode is toggled
+        self._notifier = pysshlm_config.get ("line_mode_notifier")
+        self._line_buffered_mode_notifier_on = '[%s]' % (self._notifier,)
+        self._line_buffered_mode_notifier_off = '[\%s]' % (self._notifier,)
+        # used to display a prompt when entering quit mode
+        self._quit_prompt_message = pysshlm_config.get ("quit_prompt_message")
+        # save a reference to the cmd we will spawn
+        self._cmd = cmd
+        # spawn the PTY (get dimensions from current tty)
+        self._pty = PtyProcessUnicode.spawn (cmd,
+                        dimensions=get_term_dimensions())
+        # for handling reading/writing to/from pty and writing
+        # to the user's terminal
+        self._io = TermIOHandler (self._pty)
+        # set-up handling for terminal window resize
+        self._setup_SIGWINCH_handler()
+        self._has_been_resized = False
+        # set when the session ends
+        self._session_over_flag = threading.Event()
 
+    def _setup_mode_controller (self):
+        # which mode is the thinwrapper in?
+        # default to key passthrough initially
+        self._mode_controller = ModeController (initial_mode=KEY_PASSTHROUGH)
+        # build a map of methods keyed by modes with
+        # which we'll respond to key presses
+        self._keypress_processor_methods_by_mode = {
+            KEY_PASSTHROUGH: self._process_keypress_key_passthrough,
+            LINE_BUFFERED: self._process_keypress_line_buffered,
+            QUIT_PROMPT: self._process_keypress_quit_prompt,
+        }
+        # register callbacks for mode transitions
+        self._mode_controller._on_transition (
+                KEY_PASSTHROUGH,
+                LINE_BUFFERED,
+                self._transition_key_passthrough_to_line_buffered)
+        self._mode_controller._on_transition (
+                LINE_BUFFERED,
+                KEY_PASSTHROUGH,
+                self._transition_line_buffered_to_key_passthrough)
+        self._mode_controller._on_enter (
+                QUIT_PROMPT,
+                self._mode_entered_quit_prompt)
+        self._mode_controller._on_leave (
+                QUIT_PROMPT,
+                self._mode_left_quit_prompt)
+
+    def _setup_hotkeys (self):
         # read hotkey definitions from pysshlm.cfg
         # hotkeys are used to transition between modes
         raw_hotkeys_map = ast.literal_eval (pysshlm_config.get ("hotkeys"))
@@ -44,21 +92,14 @@ class ThinWrapper():
         self._hotkey_to_mode_map = dict (map (
             lambda tup: (tup[0], globals()[tup[1]]),
             raw_hotkeys_map.iteritems()))
-
-        # we need to reverse the direction of the above map's
-        # pointing to build the mode -> key map
-        def reverse_tuple (tup):
-            return tup[::-1]  # "idiomatic" way to reverse a tuple in python
-        self._mode_to_hotkey_map = dict (map (reverse_tuple,
+        # we need to reverse the direction of the above map
+        # to build the mode -> key map
+        self._mode_to_hotkey_map = dict (map (lambda tup: tup[::-1],
                         self._hotkey_to_mode_map.iteritems()))
-
-        # which mode is the thinwrapper in?
-        self._mode = KEY_PASSTHROUGH  # default to KEY_PASSTHROUGH initially
-        # used to return to prior mode in some circumstances
-        self._last_mode = self._mode
-
         # build a map of hotkeys active in each mode, and which modes they
         # will transition us to if received while in that mode
+        # (for help in understanding how this map is used,
+        # see the definition of _get_mode_for_hotkey() below
         self._hotkey_mode_transition_map = {
             KEY_PASSTHROUGH: {
                 self._mode_to_hotkey_map [LINE_BUFFERED]: LINE_BUFFERED
@@ -71,83 +112,6 @@ class ThinWrapper():
             # we merely prompt and: quit, or, return to prior mode
             QUIT_PROMPT: {}
         }
-
-        # build a map of methods keyed by ThinWrapperModes with
-        # which we'll respond to key presses
-        self._keypress_processor_methods_by_mode = {
-            KEY_PASSTHROUGH: self._process_keypress_key_passthrough,
-            LINE_BUFFERED: self._process_keypress_line_buffered,
-            QUIT_PROMPT: self._process_keypress_quit_prompt,
-        }
-
-        # a dictionary of methods keyed by an old mode, a new mode,
-        # defining what code should run when transitioning from the
-        # old mode to the new mode
-        #
-        # If the old mode key is None,
-        # the method is used when entering the new mode
-        # eg. self._mode_transition_react_methods (None, NEW_MODE)
-        #
-        # if the new mode key is None,
-        # the method is used when leaving the old mode
-        # eg. self._mode_transition_react_methods (OLD_MODE, None)
-        #
-        # NOTE: these methods will be called in the manner specified
-        # in _transition_to_mode. They will be called in the order:
-        # [mode_left, mode_transition, mode_entered]
-        # but this is a purely semantic temporal ordering which does
-        # not relate to the actual state of self._mode at any time.
-        # By the time these are called, the new mode has already been
-        # applied to self._mode
-        self._mode_transition_react_methods = {}
-        self._register_mode_transition_method (KEY_PASSTHROUGH,
-                         LINE_BUFFERED,
-                         self.mode_transition_key_passthrough_to_line_buffered)
-
-        self._register_mode_transition_method (LINE_BUFFERED,
-                         KEY_PASSTHROUGH,
-                         self.mode_transition_line_buffered_to_key_passthrough)
-
-        self._register_mode_entered_method (QUIT_PROMPT,
-                        self._mode_entered_quit_prompt)
-
-        self._register_mode_left_method (QUIT_PROMPT,
-                        self._mode_left_quit_prompt)
-
-        # used to hold the line buffer in line-editing mode
-        self._line_buffer = ""
-
-        # used to display a notifier when the line-mode is toggled
-        self._notifier = pysshlm_config.get ("line_mode_notifier")
-        self._line_buffered_mode_notifier_on = '[%s]' % (self._notifier,)
-        self._line_buffered_mode_notifier_off = '[\%s]' % (self._notifier,)
-
-        # used to display a prompt when entering quit mode
-        self._quit_prompt_message = pysshlm_config.get ("quit_prompt_message")
-
-        # save a reference to the cmd
-        self._cmd = cmd
-        # spawn the PTY (get dimensions from current tty)
-        self._pty = PtyProcessUnicode.spawn (cmd,
-                        dimensions=get_term_dimensions())
-
-        # for handling reading/writing to/from pty and writing
-        # to the user's terminal
-        self._io = TermIOHandler (self._pty)
-
-        # set-up handling for terminal window resize
-        self._setup_SIGWINCH_handler()
-        self._has_been_resized = False
-
-        # two looping threads that will process input and
-        # output to/from the user / pty
-        # they are initialized and run in enter()
-        self._flow_output_thread = None
-        self._flow_input_thread = None
-
-        # used to allow the flow_output thread to
-        # end itself and flow_input if we get EOF
-        self._session_over_flag = threading.Event()
 
     #
     #
@@ -165,7 +129,8 @@ class ThinWrapper():
         signal.signal (signal.SIGWINCH, handler)
 
         # create a thread that every 1000 milliseconds will
-        # check if the window has changed size
+        # check if the window has changed size, and propagate
+        # the sigwinch with self._pty.setwinsize() if so
         def check_resize():
             while self._pty.isalive():
                 time.sleep (1)
@@ -173,58 +138,7 @@ class ThinWrapper():
                     self._pty.setwinsize (*(get_term_dimensions()))
                     self._has_been_resized = False
         check_resize_thread = threading.Thread (target=check_resize)
-        check_resize_thread.setDaemon (True)
         check_resize_thread.start()
-
-    #
-    #
-    # hotkey and mode transition methods
-    #
-    #
-
-    # transition to a given mode
-    def _transition_to_mode (self, new_mode):
-        if (self._mode == new_mode):
-            return  # already in the mode
-        else:
-            # change the mode state
-            old_mode = self._mode
-            self._last_mode = old_mode
-            self._mode = new_mode
-            # run mode transition react methods
-            self._on_mode_left (old_mode)
-            self._on_mode_transition (old_mode, new_mode)
-            self._on_mode_entered (new_mode)
-
-    # react to a mode transition
-    def _on_mode_transition (self, old_mode, new_mode):
-        if (self._mode_transition_react_methods.get (old_mode)
-                        is not None and
-            self._mode_transition_react_methods [old_mode].get (new_mode)
-                        is not None):
-            # if we're here, we've confirmed the transition
-            # react method exists, call it
-            self._mode_transition_react_methods [old_mode] [new_mode] ()
-
-    def _on_mode_left (self, old_mode):
-        self._on_mode_transition (old_mode, None)
-
-    def _on_mode_entered (self, new_mode):
-        self._on_mode_transition (None, new_mode)
-
-    # attach a method to the _mode_transition_react_methods map
-    def _register_mode_transition_method (self, old_mode, new_mode, method):
-        # build necessary map hierarchy
-        if self._mode_transition_react_methods.get (old_mode) is None:
-            self._mode_transition_react_methods [old_mode] = {}
-        # attach the method to the map
-        self._mode_transition_react_methods [old_mode] [new_mode] = method
-
-    def _register_mode_left_method (self, old_mode, method):
-        self._register_mode_transition_method (old_mode, None, method)
-
-    def _register_mode_entered_method (self, new_mode, method):
-        self._register_mode_transition_method (None, new_mode, method)
 
     #
     #
@@ -250,7 +164,7 @@ class ThinWrapper():
         self._line_buffer += s
 
     # run on entering LINE_BUFFERED from KEY_PASSTHROUGH
-    def mode_transition_key_passthrough_to_line_buffered (self):
+    def _transition_key_passthrough_to_line_buffered (self):
         self._io.display_notifier (self._line_buffered_mode_notifier_on)
 
     # process a kepress in LINE_BUFFERED mode
@@ -302,6 +216,7 @@ class ThinWrapper():
     # quit_prompt mode methods
     #
     #
+
     def _mode_entered_quit_prompt (self):
         self._io.screen_write (self._quit_prompt_message)
 
@@ -312,7 +227,7 @@ class ThinWrapper():
         if (key == '\x0d' or  # (0d == ENTER)
                 key == 'y' or
                 key == 'Y'):
-            self.close()
+            self.end_session()
         elif (key == 'n' or
                 key == 'N'):
             self._transition_to_mode (self._last_mode)
@@ -324,7 +239,7 @@ class ThinWrapper():
     #
 
     # run on entering KEY_PASSTHROUGH from LINE_BUFFERED
-    def mode_transition_line_buffered_to_key_passthrough (self):
+    def _transition_line_buffered_to_key_passthrough (self):
         self._cancel_current_line_edits()
         self._io.display_notifier (self._line_buffered_mode_notifier_off)
 
@@ -337,23 +252,37 @@ class ThinWrapper():
     #
     #
 
+    # determine if a key is a hotkey
+    def _key_is_hotkey (self, key):
+        hotkeys = self._hotkey_mode_transition_map \
+                        [self._mode_controller.mode].keys()
+        return key in hotkeys
+
+    # use the mode hotkey map to find the mode a given hotkey triggers,
+    # in the mode we're currently in
+    def _get_mode_for_hotkey (self, hotkey):
+        current_mode = self._mode_controller.mode
+        return self._hotkey_mode_transition_map [current_mode] [hotkey]
+
+    # get the keypress processor method given our current mode
+    def _get_keypress_processor_method (self):
+        return self._keypress_processor_methods_by_mode \
+                [self._mode_controller.mode]
+
     # react to a keypress - main entrypoint for every keypress,
     # regardless of mode or whether key is hotkey
     def _on_press (self, key):
-
         # block keypress processing while a notifier active
         self._io.can_process_keypress_flag.wait()
-
         # check if key pressed is a mode transition hotkey for the current mode
-        if (key in self._hotkey_mode_transition_map [self._mode].keys()):
+        if self._key_is_hotkey (key):
             # if it's active, act on it
-            new_mode = self._hotkey_mode_transition_map [self._mode] [key]
-            self._transition_to_mode (new_mode)
-
+            new_mode = self._get_mode_for_hotkey (key)
+            self._mode_controller.transition_to (new_mode)
         # else process the keypress according to the current mode
         else:
-            # process key press according to current mode
-            self._keypress_processor_methods_by_mode [self._mode] (key)
+            key_processor = self._get_keypress_processor_method()
+            key_processor (key)
 
     #
     #
@@ -370,18 +299,19 @@ class ThinWrapper():
                 self._io.screen_write (s)
             except EOFError:
                 self._io.screen_writeln ('[pysshlm] EOF')
-                # break, since this will only come if the pty is dead
-                break
+                self.end_session()
             except UnicodeDecodeError as e:
                 self._io.screen_writeln ("[pysshlm]: %s." % (str (e),))
                 self._io.screen_writeln ("[pysshlm]: Possibly stdout of \
                         session tried to send binary data, such as when \
                         running \"cat\" on a binary file?")
+                self.end_session()
 
     def _flow_input (self):
         while not self._session_over_flag.is_set():
-            c = sys.stdin.read (1)
-            self._on_press (c)
+            c = self._t.inkey(timeout=0.3)
+            if c != '':  # timeout returns ''
+                self._on_press (c)
 
     #
     #
@@ -389,27 +319,26 @@ class ThinWrapper():
     #
     #
 
-    def exit (self):
+    def end_session (self):
         self._session_over_flag.set()
+        self._pty.terminate()
+
+    def exit (self):
         termios.tcsetattr (sys.stdin.fileno(),
-                termios.TCSADRAIN,
+                termios.TCSAFLUSH,
                 self._old_tty_settings)
 
     # begin actually acting as a thin layer -
     # start flowing input and output to/from the pty
     def enter (self):
-
         # kick into raw mode
         self._old_tty_settings = termios.tcgetattr (sys.stdin.fileno())
         tty.setraw (sys.stdin.fileno())
-
+        # start the input and ouput threads
         self._flow_output_thread = threading.Thread (target=self._flow_output)
-        self._flow_output_thread.setDaemon (True)
         self._flow_output_thread.start()
-
         self._flow_input_thread = threading.Thread (target=self._flow_input)
-        self._flow_input_thread.setDaemon (True)
         self._flow_input_thread.start()
-
+        # wait for session over
         self._session_over_flag.wait()
         self.exit()

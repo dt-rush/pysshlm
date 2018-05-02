@@ -33,6 +33,13 @@ class TermIOHandler():
         sys.stdout.flush()
         self._drop_stdout_lock()
 
+    def screen_writeln (self, s):
+        s = "%s\r\n" % (s,)
+        self._get_stdout_lock()
+        sys.stdout.write (s)
+        sys.stdout.flush()
+        self._drop_stdout_lock()
+
     # clear n characters backward (can't go past line-breaks)
     def backspace (self, n):
         self.screen_write ('\b' * n + ' ' * n + '\b' * n)
@@ -41,8 +48,9 @@ class TermIOHandler():
         self._pty.waitnoecho()
         self._pty.write (password + '\r')
 
-    # used to notify the user of various things by temporarily displaying a message
-    # there is some dank lock / flag / thread logic here, so be careful to read good
+    # used to notify the user of various things by temporarily
+    # displaying a message there is some dank lock / flag / thread
+    # logic here, so be careful to read good
     def display_notifier (self, msg, duration=0.5):
         self._notifier_write_lock.acquire()
         # clear if existing notifier is displayed

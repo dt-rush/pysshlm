@@ -5,6 +5,8 @@ import threading
 import termios
 import tty
 
+from blessed import Terminal
+
 
 class SimpleThinWrapperMock():
 
@@ -14,6 +16,7 @@ class SimpleThinWrapperMock():
         self._special_key_map = {
             u'\x03': self._end_session
         }
+        self._t = Terminal()
 
     def _is_special_key (self, c):
         return c in self._special_key_map.keys()
@@ -39,8 +42,10 @@ class SimpleThinWrapperMock():
 
     def _flow_input (self):
         while not self._session_over_flag.is_set():
-            c = sys.stdin.read (1)
-            self._on_press (c)
+            # c = sys.stdin.read (1)
+            c = self._t.inkey (timeout=0.3)
+            if c != '':
+                self._on_press (c)
         self._input_loop_finished_flag.set()
 
     def _exit (self):
