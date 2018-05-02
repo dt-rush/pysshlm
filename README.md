@@ -26,7 +26,7 @@ After installing, run the command, optionally specifying a user and a password:
 
     pysshlm [user@]host [--password "wow you should really use keypairs"]
 
-Once the session starts, you can type CTRL+L at any time to pop into and out of line-editing mode.
+Once the session starts, you can type CTRL+] at any time to pop into and out of line-editing mode.
 
 You can force quit in line-mode by hitting CTRL+D.
 
