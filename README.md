@@ -24,7 +24,7 @@ python setup.py install --user
 
 After installing, run the command, optionally specifying a user and a password:
 
-    pysshlm [user@]host [--password "wow you should really use keypairs"]
+    pysshlm [user@]host
 
 Once the session starts, you can type CTRL+] at any time to pop into and out of line-editing mode.
 
