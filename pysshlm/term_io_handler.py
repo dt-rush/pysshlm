@@ -8,7 +8,7 @@ class TermIOHandler():
 
         # used to write to the pty
         self._pty = pty
-        
+
         # used to prevent stdout writing contention / interleaving
         # thanks to Alex Martelli for suggesting this pattern
         # https://stackoverflow.com/a/3030755/4785602
@@ -18,7 +18,8 @@ class TermIOHandler():
         # used to block processing keypresses while notifier active
         self.can_process_keypress_flag = threading.Event()
         self.can_process_keypress_flag.set()
-        # used to prevent race conditions in displaying / waiting / erasing a notifier (using threading.Timer)
+        # used to prevent race conditions in displaying /
+        # waiting / erasing a notifier (using threading.Timer)
         self._notifier_write_lock = threading.Lock()
         # the currently-displayed notifier string
         self._current_notifier_str = ""
@@ -52,7 +53,7 @@ class TermIOHandler():
         self.screen_write (self._current_notifier_str)
         self.can_process_keypress_flag.clear()
         self._notifier_write_lock.release()
-        
+
         # to be run after a delay
         def remove_active_notifier():
             self._notifier_write_lock.acquire()

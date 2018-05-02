@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """A setuptools-based setup module.
 
 See:
@@ -5,23 +6,25 @@ https://packaging.python.org/en/latest/distributing.html
 https://github.com/pypa/sampleproject
 """
 
-# Always prefer setuptools over distutils
-from setuptools import setup, find_packages
+import sys
+from os import path
 # To use a consistent encoding
 from codecs import open
-from os import path
+
+from setuptools import setup, find_packages
+
 
 here = path.abspath (path.dirname (__file__))
 
 # Get the long description from the README file
 with open (path.join (here, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
-    
+
 # Get the requirements from requirements.txt
 with open (path.join (here, 'requirements.txt')) as f:
     requirements = f.read().splitlines()
 if requirements is None:
-    print "/!\\ failed to read requirements.txt, could not run setup.py!!!"
+    print ("/!\\ failed to read requirements.txt, could not run setup.py!!!")
     sys.exit (-1)
 
 setup(

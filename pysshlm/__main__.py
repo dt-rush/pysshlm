@@ -2,15 +2,12 @@
 # coding: utf8
 
 import sys
-import logging
-
 
 
 from pysshlm.argparser import argparser
-from pysshlm.funcs import run_session
+from pysshlm.thin_wrapper import ThinWrapper
 
-
-banner="""
+banner = """
 ┌─┐┬ ┬┌─┐┌─┐┬ ┬┬  ┌┬┐
 ├─┘└┬┘└─┐└─┐├─┤│  │││
 ┴   ┴ └─┘└─┘┴ ┴┴─┘┴ ┴
@@ -21,16 +18,20 @@ def main(args=None):
 
     if args is None:
         args = sys.argv[1:]
-        
+
     args = argparser.parse_args (args)
 
     ssharg = args.ssharg
     password = args.password
 
-    print banner
-    run_session (ssharg, password)
+    print (banner)
 
-    
-    
+    # build the wrapper
+    w = ThinWrapper (['ssh', ssharg], password)
+    # enter the wrapper (spawns 2 threads to flow input and
+    # output, so is non-blocking)
+    w.enter()
+
+
 if __name__ == "__main__":
     main()
