@@ -6,26 +6,21 @@ https://packaging.python.org/en/latest/distributing.html
 https://github.com/pypa/sampleproject
 """
 
-import sys
-from os import path
-# To use a consistent encoding
 from codecs import open
+from os import path
+import sys
 
-from setuptools import setup, find_packages
-
-
-here = path.abspath (path.dirname (__file__))
+try:
+    from setuptools import setup, find_packages
+except ImportError:
+    from distutils.core import setup, find_packages
 
 # Get the long description from the README file
-with open (path.join (here, 'README.md'), encoding='utf-8') as f:
-    long_description = f.read()
-
-# Get the requirements from requirements.txt
-with open (path.join (here, 'requirements.txt')) as f:
-    requirements = f.read().splitlines()
-if requirements is None:
-    print ("/!\\ failed to read requirements.txt, could not run setup.py!!!")
-    sys.exit (-1)
+try:
+    with open (path.join (here, 'README.md'), encoding='utf-8') as f:
+        long_description = f.read()
+except:
+    long_description = "could not read README.md - see that file"
 
 setup(
     name='pysshlm',
@@ -85,7 +80,12 @@ setup(
     # your project is installed. For an analysis of "install_requires" vs pip's
     # requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
-    install_requires=requirements,
+    install_requires=[
+        "blessed==1.14.2",
+        "ptyprocess==0.5.2",
+        "six==1.11.0",
+        "wcwidth==0.1.7",
+    ],
 
     # To provide executable scripts, use entry points in preference to the
     # "scripts" keyword. Entry points provide cross-platform support and allow
