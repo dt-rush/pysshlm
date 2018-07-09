@@ -30,19 +30,8 @@ Once the session starts, you can type CTRL+] at any time to pop into and out of 
 
 You can force quit in line-mode by hitting CTRL+D.
 
-## windows
-
-Windows is not supported and I can't believe you are trying to do terminal-based stuff in windows. I'm sorry to hear about that. Let me guess, you got the cygwin blues? Or is gitbash a harsh mistress? Maybe try VirtualBox? 
-
-![Yep.](/images/linuxftw.gif?raw=true)
-
 ## future features
 
 * line history with up/down arrow keys 
 * left/right arrow key line navigation (including CTRL+left, CTRL+right)
 * tab completion (this will be a bit annoying to implement)
-
-## contributors
-
-dt-rush <nick.8.payne@gmail.com>
-possibly you?
