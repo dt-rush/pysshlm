@@ -22,6 +22,8 @@ setup(
     description='Wrap an SSH session with hotkey to pop into/out of line-' + \
                 'editing mode',
 
+    long_description='see README.md',
+
     # The project's main homepage.
     url='https://github.com/dt-rush/pysshlm',
 
