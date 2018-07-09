@@ -1,6 +1,8 @@
 pysshlm
 ===
 
+[![Build Status](https://travis-ci.com/dt-rush/pysshlm.svg?branch=master)](https://travis-ci.com/dt-rush/pysshlm)
+
 ## why?
 
 This program was created to wrap an ssh session with the ability to enter a hotkey which pops you out into "line-editing mode", so that you can type full lines without sending a single char at a time over the tunnel and waiting for it to ACK. This can really be an annoyance especially if your keyboard, like mine, misses keys sometimes, and *especially* you're on a very high latency link, such as a GSM or satellite link.

@@ -6,21 +6,10 @@ https://packaging.python.org/en/latest/distributing.html
 https://github.com/pypa/sampleproject
 """
 
-from codecs import open
-from os import path
-import sys
-
 try:
     from setuptools import setup, find_packages
 except ImportError:
     from distutils.core import setup, find_packages
-
-# Get the long description from the README file
-try:
-    with open (path.join (here, 'README.md'), encoding='utf-8') as f:
-        long_description = f.read()
-except:
-    long_description = "could not read README.md - see that file"
 
 setup(
     name='pysshlm',
@@ -30,8 +19,8 @@ setup(
     # https://packaging.python.org/en/latest/single_source_version.html
     version='1.0.0',
 
-    description='Wrap an SSH session with hotkey to pop into/out of line-editing mode',
-    long_description=long_description,
+    description='Wrap an SSH session with hotkey to pop into/out of line-' + \
+                'editing mode',
 
     # The project's main homepage.
     url='https://github.com/dt-rush/pysshlm',
